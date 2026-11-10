@@ -86,7 +86,8 @@ def is_test_path(rel: str) -> bool:
 
 
 class Source:
-    def __init__(self, path: Path, root: Path, is_target: bool):
+    def __init__(self, path: Path, root: Path, is_target: bool, text=None):
+        """text を渡すと、ファイルの代わりにそれを調べる(--staged でステージした中身を調べるとき)。"""
         self.path = path
         try:
             self.rel = path.relative_to(root).as_posix()
@@ -96,7 +97,9 @@ class Source:
         self.ext = path.suffix.lower()
         self.is_py = self.ext in PY_EXT
         self.is_test = is_test_path(self.rel)
-        self.text = path.read_text(encoding="utf-8", errors="replace")
+        if text is None:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        self.text = text.replace("\r\n", "\n")
         self.lines = self.text.split("\n")
         self.code, self.comments = sanitize(self.text, self.is_py)
         self.code_lines = self.code.split("\n")

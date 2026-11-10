@@ -2,10 +2,12 @@
 import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
+import type * as TS from "typescript";
 
 import {
-  BRACE_EXT, CATALOG, type CheckName, type Config, IGNORE_MARK, PY_EXT, RE_PY_CLI, type Severity, SKIP_DIRS,
+  BRACE_EXT, CATALOG, type CheckName, type Config, IGNORE_MARK, JS_TS_EXT, PY_EXT, RE_PY_CLI, type Severity, SKIP_DIRS,
 } from "./rules.ts";
+import { type Literal, literalRanges, parseTs, type TsModule } from "./ts-parse.ts";
 
 // ---------------------------------------------------------------- 読み込み
 
@@ -57,24 +59,39 @@ const trimChars = (s: string, chars: string, side: "both" | "start" = "both"): s
   return s.slice(a, b);
 };
 
+/** i から文字列が始まるなら [終わりの位置, 中身を空白にしたもの] を返す。文字の並びから推測する。 */
+function guessedString(text: string, i: number, isPy: boolean): [number, string] | null {
+  const quote = quoteAt(text, i, isPy);
+  if (!quote) return null;
+  const j = stringEnd(text, i, quote);
+  const tail = text.startsWith(quote, j) ? quote : "";
+  return [j + tail.length, quote + blank(text.slice(i + quote.length, j)) + tail];
+}
+
+/** i から構文解析で見つけた文字列などが始まるなら [終わりの位置, 中身を空白にしたもの] を返す。 */
+function parsedLiteral(text: string, i: number, literals: Map<number, Literal>): [number, string] | null {
+  const lit = literals.get(i);
+  if (!lit) return null;
+  const inner = Math.max(i + lit.head, lit.end - lit.tail);
+  return [lit.end, text.slice(i, i + lit.head) + blank(text.slice(i + lit.head, inner)) + text.slice(inner, lit.end)];
+}
+
 /**
  * 文字列の中身とコメントを空白に置き換える(長さと行数は変えない)。
+ * literals(構文解析で見つけた文字列・正規表現などの範囲)を渡すと、文字の並びから推測する代わりにそれを使う。
  * 戻り値: [置き換えた後のコード, コメントの一覧]
  */
-export function sanitize(text: string, isPy: boolean): [string, Comment[]] {
+export function sanitize(text: string, isPy: boolean, literals?: Map<number, Literal>): [string, Comment[]] {
   const out: string[] = [];
   const comments: Comment[] = [];
   let i = 0;
   let line = 1;
   while (i < text.length) {
-    const quote = quoteAt(text, i, isPy);
+    const literal = literals ? parsedLiteral(text, i, literals) : guessedString(text, i, isPy);
     let j: number;
     let piece: string;
-    if (quote) {
-      j = stringEnd(text, i, quote);
-      const tail = text.startsWith(quote, j) ? quote : "";
-      piece = quote + blank(text.slice(i + quote.length, j)) + tail;
-      j += tail.length;
+    if (literal) {
+      [j, piece] = literal;
     } else if (startsLineComment(text, i, isPy)) {
       j = endOf(text, i, "\n", false);
       comments.push({ line, body: trimChars(text.slice(i, j), "#/ ", "start").trimEnd(), isLine: true });
@@ -143,19 +160,26 @@ export class Source {
   readonly isCli: boolean;
   readonly filePath: string;
   readonly isTarget: boolean;
-  /** typescript の構文解析で調べたか(any は構文木で見つけるので、行ごとの検出では探さない) */
-  parsedByTs = false;
+  /** typescript で構文解析した結果。JS/TS で typescript が見つかったときだけある */
+  readonly tsFile: TS.SourceFile | undefined;
 
-  constructor(filePath: string, root: string, isTarget: boolean) {
+  /**
+   * options.text を渡すと、ファイルの代わりにそれを調べる(--staged でステージした中身を調べるとき)。
+   * options.ts を渡すと、JS/TS は構文解析してから文字列やコメントを取り除く。
+   */
+  constructor(filePath: string, root: string, isTarget: boolean, options: { text?: string; ts?: TsModule | null } = {}) {
     this.filePath = filePath;
     this.isTarget = isTarget;
     this.rel = relPath(filePath, root);
     this.ext = path.extname(filePath).toLowerCase();
     this.isPy = PY_EXT.has(this.ext);
     this.isTest = isTestPath(this.rel);
-    this.text = readFileSync(filePath, "utf8").replaceAll("\r\n", "\n");
+    this.text = (options.text ?? readFileSync(filePath, "utf8")).replaceAll("\r\n", "\n");
     this.lines = this.text.split("\n");
-    [this.code, this.comments] = sanitize(this.text, this.isPy);
+    const ts = options.ts;
+    this.tsFile = ts && JS_TS_EXT.has(this.ext) ? parseTs(ts, filePath, this.text, this.ext) : undefined;
+    const literals = ts && this.tsFile ? literalRanges(ts, this.tsFile) : undefined;
+    [this.code, this.comments] = sanitize(this.text, this.isPy, literals);
     this.codeLines = this.code.split("\n");
     this.isCli = this.isPy && RE_PY_CLI.test(this.text);
   }

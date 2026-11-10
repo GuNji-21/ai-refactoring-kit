@@ -16,6 +16,7 @@ AIと一緒にコードを書くときの、リファクタリング支援キッ
 | JS / TS の解析 | 文字の並びから推測 | **TypeScript の構文解析を使うので正確**（typescript が見つからなければ推測に切り替える） |
 | Python の解析 | 構文を解析するので正確 | 字下げから推測 |
 | any の検出 | 行ごとの正規表現 | 構文木で見つける（`Array<any>` も見つかり、正規表現や文字列の中の `any` は数えない） |
+| コメントと文字列の見分け方 | 文字の並びから推測 | JS / TS は構文解析で、文字列・テンプレート・正規表現・JSX の文字の範囲を見つけてから探す（`/[//] @ts-ignore/` のような正規表現の中の `//` をコメントと取り違えない） |
 | 分岐の数（R08） | `if` `for` `while` `case` `catch` `&&` `\|\|` | 左に加えて `?:` と `??` も数える |
 | 一番外の書き換えられる変数（F06） | `let` / `var` の行 | 同じ。構文解析のときは変数名も出す |
 | テストのまとまり | （Python のテストはクラスなので関係なし） | `describe(() => { … })` の中身は、関数の長さなどを数えない |
@@ -45,6 +46,8 @@ npm install -D typescript
 ```
 
 以下のコマンドは、`checks/` を自分のプロジェクトにコピーした後の形で書いています。このリポジトリの中で試すときは、`ts/` に移って `npm install` してから実行してください。
+
+npm のパッケージとしては配っていません（`package.json` は `private`）。Node.js は `node_modules` の中の `.ts` をそのまま実行できないので、`npm install` で入れる形にするには JavaScript にビルドした入口が別に必要になります。
 
 フォルダ全体を調べる：
 
@@ -88,6 +91,7 @@ node checks/refactor-check.ts --changed --json
 | オプション | 意味 |
 |---|---|
 | `--changed` | git で変更・追加したファイルだけを調べる。重複はプロジェクト全体と比べる |
+| `--staged` | ステージした中身だけを調べる。作業中のファイルではなく、コミットされる中身を読む。コミット前のフックで使う |
 | `--json` | JSON で出力する |
 | `--all` | low の項目も表示する |
 | `--root フォルダ` | プロジェクトの一番上のフォルダを指定する |
@@ -168,10 +172,10 @@ node checks/refactor-check.ts --changed --json
 
 ### コミット前に止める
 
-重大な問題があるときだけコミットを止めるには、`.git/hooks/pre-commit` に次を書きます。
+重大な問題があるときだけコミットを止めるには、`.git/hooks/pre-commit` に次を書きます。`--changed` ではなく `--staged` を使います。`--changed` は作業中のファイルを読むので、ステージした後で作業中のファイルを戻すと、コミットされる問題を見逃します。
 
 ```bash
-node checks/refactor-check.ts --changed --fail-on act
+node checks/refactor-check.ts --staged --fail-on act
 ```
 
 ## 開発
@@ -190,6 +194,7 @@ npm run typecheck   # 型の確認(tsc)
 | `checks/refactor-check.ts` | 入口。判定と出力 |
 | `checks/rules.ts` | 目安の初期値、カタログとの対応、正規表現 |
 | `checks/core.ts` | ファイルの読み込み、コメントと文字列の除去、問題の記録 |
+| `checks/ts-parse.ts` | typescript の読み込みと構文解析。文字列・正規表現などの範囲を見つける |
 | `checks/ts-ast.ts` | JS / TS の検出（TypeScript の構文解析） |
 | `checks/brace.ts` | 波かっこを使う言語の検出（文字の並びから推測） |
 | `checks/python.ts` | Python の検出（字下げから推測） |

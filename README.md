@@ -68,6 +68,7 @@ python checks/refactor_check.py --changed --json
 | オプション | 意味 |
 |---|---|
 | `--changed` | git で変更・追加したファイルだけを調べる。重複はプロジェクト全体と比べる |
+| `--staged` | ステージした中身だけを調べる。作業中のファイルではなく、コミットされる中身を読む。コミット前のフックで使う |
 | `--json` | JSON で出力する |
 | `--all` | low の項目も表示する |
 | `--root フォルダ` | プロジェクトの一番上のフォルダを指定する |
@@ -147,10 +148,10 @@ JS / TS のプロジェクトでは、[TypeScript 版](#typescript-版) を使�
 
 ### コミット前に止める
 
-重大な問題があるときだけコミットを止めるには、`.git/hooks/pre-commit` に次を書きます。
+重大な問題があるときだけコミットを止めるには、`.git/hooks/pre-commit` に次を書きます。`--changed` ではなく `--staged` を使います。`--changed` は作業中のファイルを読むので、ステージした後で作業中のファイルを戻すと、コミットされる問題を見逃します。
 
 ```bash
-python checks/refactor_check.py --changed --fail-on act
+python checks/refactor_check.py --staged --fail-on act
 ```
 
 ## TypeScript 版

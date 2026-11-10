@@ -1,29 +1,12 @@
 /**
  * JavaScript / TypeScript の検出。TypeScript の構文解析を使うので正確に数えられる。
- * typescript が見つからなければ null を返し、呼び出し側は文字の並びからの推測(brace.ts)に切り替える。
+ * typescript が見つからないときは、呼び出し側が文字の並びからの推測(brace.ts)に切り替える。
  */
-import { createRequire } from "node:module";
-import path from "node:path";
 import type * as TS from "typescript";
 
 import { ANONYMOUS } from "./brace.ts";
 import { checkFunctionMetrics, type Report, type Source } from "./core.ts";
-
-export type TsModule = typeof TS;
-
-function tryRequire(base: string): TsModule | null {
-  try {
-    return createRequire(base)("typescript") as TsModule;
-  } catch { // refactor-check: ignore  見つからないのは想定どおり。呼び出し側で次の場所を試す
-    return null;
-  }
-}
-
-/** 調べるプロジェクトの typescript を優先し、なければこのキットの隣のものを使う。 */
-export function loadTypeScript(root: string): TsModule | null {
-  if (process.env.REFACTOR_CHECK_NO_TS) return null;
-  return tryRequire(path.join(root, "package.json")) ?? tryRequire(import.meta.filename);
-}
+import type { TsModule } from "./ts-parse.ts";
 
 type FunctionNode = TS.SignatureDeclaration & { body?: TS.Node };
 
@@ -219,12 +202,9 @@ function checkAny(c: Ctx, anyLines: Set<number>): void {
   }
 }
 
-export function checkTs(ts: TsModule, rep: Report, src: Source): void {
-  const kinds: Record<string, TS.ScriptKind> = {
-    ".tsx": ts.ScriptKind.TSX, ".jsx": ts.ScriptKind.JSX,
-    ".js": ts.ScriptKind.JS, ".mjs": ts.ScriptKind.JS, ".cjs": ts.ScriptKind.JS,
-  };
-  const sf = ts.createSourceFile(src.filePath, src.text, ts.ScriptTarget.Latest, true, kinds[src.ext] ?? ts.ScriptKind.TS);
+/** src.tsFile(Source を作るときに構文解析したもの)を調べる。 */
+export function checkTs(ts: TsModule, rep: Report, src: Source & { tsFile: TS.SourceFile }): void {
+  const sf = src.tsFile;
   const c: Ctx = { ts, sf, rep, src };
   const anyLines = new Set<number>();
   const visit = (node: TS.Node): void => {
