@@ -1,0 +1,22 @@
+{
+  "name": "ai-refactoring-kit-ts",
+  "version": "1.0.0",
+  "description": "AIと一緒にコードを書くときの、リファクタリング支援キット(TypeScript 版)",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "bin": {
+    "refactor-check": "checks/refactor-check.ts"
+  },
+  "scripts": {
+    "check": "node checks/refactor-check.ts",
+    "test": "node --test tests/*.test.ts",
+    "typecheck": "tsc"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}
