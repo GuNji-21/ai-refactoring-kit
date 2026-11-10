@@ -107,6 +107,8 @@ python checks/refactor_check.py --changed --json
 | Python | 構文を解析するので正確 |
 | JavaScript / TypeScript / Java / Go / C# / Kotlin | 文字の並びから推測する。関数の見つけ方に取りこぼしや誤検出がありうる |
 
+JS / TS のプロジェクトでは、[TypeScript 版](#typescript-版) を使うと JS / TS を構文解析で正確に調べられます。
+
 ### 目安を変える
 
 プロジェクトの一番上に `.refactor-check.json` を置くと、目安を変えられます。書いた項目だけが上書きされます。
@@ -150,6 +152,21 @@ python checks/refactor_check.py --changed --json
 ```bash
 python checks/refactor_check.py --changed --fail-on act
 ```
+
+## TypeScript 版
+
+[ts/](ts/README.md) に、同じ判定を Node.js で動かす TypeScript 版があります。Python がない環境や、JS / TS のプロジェクトで使います。
+
+```bash
+node checks/refactor-check.ts --changed --json
+```
+
+- 検出する項目、判定の基準、目安の初期値、JSON の形、`.refactor-check.json` は Python 版と同じ
+- JS / TS は TypeScript の構文解析で調べるので正確（`typescript` が見つからなければ、文字の並びからの推測に切り替える）
+- Python は字下げから推測するので、Python のプロジェクトには Python 版のほうが正確
+- Node.js 22.18 以上。`.ts` をビルドせずにそのまま実行する
+
+カタログ（`catalog.md`）は両方で共通です。使い方とコピーするファイルは [ts/README.md](ts/README.md) にあります。
 
 ## 開発
 
