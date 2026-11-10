@@ -169,3 +169,7 @@ python -m unittest discover -s tests
 | `checks/rc_lines.py` | 行ごとの検出と重複の検出 |
 
 検出を足すときは、`rc_rules.py` の `CATALOG` に1行足し、検出の関数を書き、`tests/` にテストを足します。
+
+## ライセンス
+
+[MIT License](LICENSE)
