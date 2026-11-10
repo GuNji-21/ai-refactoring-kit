@@ -9,6 +9,7 @@
  * 使い方:
  *   node checks/refactor-check.ts [パス ...]   指定したファイルやフォルダを調べる
  *   node checks/refactor-check.ts --changed    git で変更したファイルだけを調べる
+ *   node checks/refactor-check.ts --staged     ステージした中身だけを調べる(コミット前のフック用)
  *   node checks/refactor-check.ts --json       AI が読みやすい JSON で出力する
  *
  * Node.js 22.18 以上(.ts をそのまま実行できる版)。
@@ -25,10 +26,11 @@ import {
 import { checkDuplicates, FILE_CHECKS } from "./lines.ts";
 import { checkPython } from "./python.ts";
 import {
-  CONFIG_FILE, type Config, DEFAULTS, JS_TS_EXT, MAX_FILE_BYTES, MAX_LINE_CHARS, MINIFIED_SAMPLE_LINES,
+  CONFIG_FILE, type Config, DEFAULTS, MAX_FILE_BYTES, MAX_LINE_CHARS, MINIFIED_SAMPLE_LINES,
   SEVERITY_ORDER, type Severity,
 } from "./rules.ts";
-import { checkTs, loadTypeScript } from "./ts-ast.ts";
+import { checkTs } from "./ts-ast.ts";
+import { loadTypeScript, type TsModule } from "./ts-parse.ts";
 
 export { DEFAULTS };
 
@@ -124,6 +126,24 @@ function changedFiles(root: string, exclude: string[]): Set<string> {
   return new Set(paths.filter((p) => isFile(p) && wanted(p) && !isExcluded(p, exclude)));
 }
 
+/**
+ * ステージした変更のあるファイルと、ステージした中身(パス -> 中身)。
+ * 作業中のファイルではなくインデックスの中身を読むので、コミットされるものをそのまま調べられる。
+ * git diff HEAD だけでは、ステージした変更と、その後で作業中のファイルを戻した変更が打ち消し合って見えなくなる。
+ */
+function stagedFiles(root: string, exclude: string[]): Map<string, string> {
+  const names = gitPaths(root, "diff", "--cached", "--name-only", "--relative", "--diff-filter=d");
+  const staged = new Map<string, string>();
+  for (const name of names) {
+    const p = path.resolve(root, name);
+    if (!wanted(p) || isExcluded(p, exclude)) continue;
+    const text = git(root, "show", `:./${name}`);
+    if (text === null) throw new GitError(`git show :./${name} が失敗しました`);
+    staged.set(p, text);
+  }
+  return staged;
+}
+
 function listedFiles(paths: string[], exclude: string[]): Set<string> {
   const found = new Set<string>();
   for (const raw of paths.length ? paths : ["."]) {
@@ -135,14 +155,23 @@ function listedFiles(paths: string[], exclude: string[]): Set<string> {
   return found;
 }
 
-function loadSources(files: Set<string>, targets: Set<string>, root: string): Source[] {
+/** 調べるファイル。texts にあるファイルは、ファイルの代わりにその中身を調べる。 */
+interface Selection {
+  targets: Set<string>; // 問題を報告するファイル
+  files: Set<string>; // 読み込むファイル(重複を比べる相手を含む)
+  texts: Map<string, string>;
+}
+
+function loadSources(sel: Selection, root: string, ts: TsModule | null): Source[] {
   const sources: Source[] = [];
-  for (const p of [...files].sort()) {
+  for (const p of [...sel.files].sort()) {
+    const text = sel.texts.get(p);
     let src: Source;
     try {
-      if (statSync(p).size > MAX_FILE_BYTES) continue;
-      src = new Source(p, root, targets.has(p));
-    } catch {
+      const size = text !== undefined ? Buffer.byteLength(text) : statSync(p).size;
+      if (size > MAX_FILE_BYTES) continue;
+      src = new Source(p, root, sel.targets.has(p), { text, ts });
+    } catch { // refactor-check: ignore  読めないファイルは調べない(Python 版と同じ)
       continue;
     }
     // 1行が極端に長いのは圧縮済みのファイルなので除く
@@ -151,50 +180,56 @@ function loadSources(files: Set<string>, targets: Set<string>, root: string): So
   return sources;
 }
 
-/** [問題を報告するファイル, 読み込むファイル] を返す。 */
-function selectFiles(paths: string[], root: string, changed: boolean, exclude: string[]): [Set<string>, Set<string>] {
-  if (!changed) {
-    const targets = listedFiles(paths, exclude);
-    return [targets, targets];
-  }
-  const targets = changedFiles(root, exclude);
-  const files = new Set(targets);
-  for (const p of walk(root, exclude)) files.add(path.resolve(p)); // 重複は全体と比べる
-  return [targets, files];
+export interface AnalyzeOptions {
+  changed?: boolean; // git で変更したファイルだけを調べる
+  staged?: boolean; // ステージした中身だけを調べる
+  cfg?: Config;
 }
 
-function runChecks(sources: Source[], cfg: Config, root: string) {
+function selectFiles(paths: string[], root: string, options: AnalyzeOptions, exclude: string[]): Selection {
+  let targets: Set<string>;
+  let texts = new Map<string, string>();
+  if (options.staged) {
+    texts = stagedFiles(root, exclude);
+    targets = new Set(texts.keys());
+  } else if (options.changed) {
+    targets = changedFiles(root, exclude);
+  } else {
+    targets = listedFiles(paths, exclude);
+    return { targets, files: targets, texts };
+  }
+  const files = new Set(targets);
+  for (const p of walk(root, exclude)) files.add(path.resolve(p)); // 重複は全体と比べる
+  return { targets, files, texts };
+}
+
+function runChecks(sources: Source[], cfg: Config, ts: TsModule | null) {
   const rep = new Report(cfg);
-  const ts = loadTypeScript(root);
   for (const src of sources) {
     if (!src.isTarget) continue;
     if (src.isPy) checkPython(rep, src);
-    else if (ts && JS_TS_EXT.has(src.ext)) {
-      checkTs(ts, rep, src);
-      src.parsedByTs = true;
-    }
+    else if (ts && src.tsFile) checkTs(ts, rep, src as Source & { tsFile: NonNullable<Source["tsFile"]> });
     else checkBrace(rep, src);
     for (const check of FILE_CHECKS) check(rep, src);
   }
   checkDuplicates(rep, sources);
-  const findings = rep.findings.sort((a, b) =>
+  return rep.findings.sort((a, b) =>
     SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]
     || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0)
     || a.line - b.line);
-  return { findings, parser: ts ? "typescript" as const : "heuristic" as const };
 }
 
-export function analyze(paths: string[], rootArg: string, options: { changed?: boolean; cfg?: Config } = {}): Result {
+export function analyze(paths: string[], rootArg: string, options: AnalyzeOptions = {}): Result {
   const root = path.resolve(rootArg);
   const cfg = options.cfg ?? loadConfig(root);
-  const [targets, files] = selectFiles(paths, root, options.changed ?? false, cfg.exclude);
-  const sources = loadSources(files, targets, root);
-  const { findings, parser } = runChecks(sources, cfg, root);
+  const ts = loadTypeScript(root);
+  const sources = loadSources(selectFiles(paths, root, options, cfg.exclude), root, ts);
+  const findings = runChecks(sources, cfg, ts);
   const pre = preflight(root, cfg.exclude);
   return {
     ...decide(findings, pre),
     files_checked: sources.filter((s) => s.isTarget).length,
-    js_ts_parser: parser,
+    js_ts_parser: ts ? "typescript" : "heuristic",
     preflight: pre,
     findings,
   };
@@ -249,6 +284,7 @@ const HELP = `使い方: node checks/refactor-check.ts [パス ...] [オプシ�
 
 オプション:
   --changed               git で変更したファイルだけを調べる
+  --staged                ステージした中身だけを調べる(コミット前のフック用)
   --root <フォルダ>       プロジェクトの一番上のフォルダ(初期値: .)
   --json                  JSON で出力する
   --all                   low の項目も表示する
@@ -259,6 +295,7 @@ const HELP = `使い方: node checks/refactor-check.ts [パス ...] [オプシ�
 interface Cli {
   paths: string[];
   changed: boolean;
+  staged: boolean;
   root: string;
   json: boolean;
   all: boolean;
@@ -276,6 +313,7 @@ function parseCli(argv: string[]): Cli | number {
       allowPositionals: true,
       options: {
         changed: { type: "boolean", default: false },
+        staged: { type: "boolean", default: false },
         root: { type: "string", default: "." },
         json: { type: "boolean", default: false },
         all: { type: "boolean", default: false },
@@ -292,24 +330,28 @@ function parseCli(argv: string[]): Cli | number {
     process.stdout.write(HELP);
     return 0;
   }
+  if (v.changed && v.staged) {
+    process.stderr.write("--changed と --staged は一緒に使えません\n");
+    return 2;
+  }
   if (!FAIL_ON.includes(v["fail-on"])) {
     process.stderr.write("--fail-on には never / act / suggest のどれかを指定してください\n");
     return 2;
   }
   return {
-    paths: positionals, changed: v.changed, root: v.root, json: v.json, all: v.all,
+    paths: positionals, changed: v.changed, staged: v.staged, root: v.root, json: v.json, all: v.all,
     failOn: v["fail-on"] as Cli["failOn"],
   };
 }
 
 /** 判定する。git の問題で調べられないときは終了コードを返す。 */
 function analyzeCli(cli: Cli): Result | number {
-  if (cli.changed && git(cli.root, "rev-parse", "--git-dir") === null) {
-    process.stderr.write("--changed は git のリポジトリの中でだけ使えます\n");
+  if ((cli.changed || cli.staged) && git(cli.root, "rev-parse", "--git-dir") === null) {
+    process.stderr.write(`${cli.staged ? "--staged" : "--changed"} は git のリポジトリの中でだけ使えます\n`);
     return 2;
   }
   try {
-    return analyze(cli.paths, cli.root, { changed: cli.changed });
+    return analyze(cli.paths, cli.root, { changed: cli.changed, staged: cli.staged });
   } catch (e) {
     if (!(e instanceof GitError)) throw e;
     process.stderr.write(`変更したファイルを調べられません: ${e.message}\n`);

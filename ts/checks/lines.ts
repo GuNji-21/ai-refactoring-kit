@@ -29,7 +29,7 @@ const ruleChain: LineRule = (rep, src, n, code) => {
 };
 
 const ruleAny: LineRule = (rep, src, n, code) => {
-  if (src.parsedByTs) return;
+  if (src.tsFile) return; // 構文解析したファイルの any は、構文木で見つける(ts-ast.ts)
   const regex = src.isPy ? RE_ANY_PY : TS_EXT.has(src.ext) ? RE_ANY_TS : null;
   if (regex?.test(code)) rep.add("type-escape", "medium", [src, n], "何でも入る型(any)で型の確認を止めている");
 };

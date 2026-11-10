@@ -296,7 +296,7 @@ class ChangedMode(unittest.TestCase):
         self.git("commit", "-q", "-m", "commit")
 
     def changed(self, **overrides):
-        return rc.analyze([], self.root, changed=True, cfg={**rc.DEFAULTS, **overrides})
+        return rc.analyze([], self.root, mode="changed", cfg={**rc.DEFAULTS, **overrides})
 
     def test_untracked_file_with_japanese_name(self):
         self.write("base.py", CLEAN)
@@ -335,12 +335,48 @@ class ChangedMode(unittest.TestCase):
         self.assertEqual(result["files_checked"], 0)
         self.assertEqual(result["verdict"], "skip")
 
+    def staged(self, **overrides):
+        return rc.analyze([], self.root, mode="staged", cfg={**rc.DEFAULTS, **overrides})
+
+    def test_staged_content_is_checked_after_worktree_is_reverted(self):
+        self.write("app.py", CLEAN)
+        self.commit_all()
+        self.write("app.py", SWALLOWS_ERROR)
+        self.git("add", "app.py")
+        self.write("app.py", CLEAN)  # 作業中のファイルだけ元に戻す。コミットされるのは問題のある中身
+        self.assertEqual(self.changed()["verdict"], "skip")
+        result = self.staged()
+        self.assertEqual(result["files_checked"], 1)
+        self.assertEqual(result["verdict"], "act")
+
+    def test_staged_ignores_unstaged_changes(self):
+        self.write("app.py", CLEAN)
+        self.commit_all()
+        self.write("app.py", SWALLOWS_ERROR)  # ステージしていないのでコミットされない
+        result = self.staged()
+        self.assertEqual(result["files_checked"], 0)
+        self.assertEqual(result["verdict"], "skip")
+
+    def test_staged_file_deleted_from_worktree(self):
+        self.write("処理.py", SWALLOWS_ERROR)
+        self.git("add", "処理.py")
+        (self.root / "処理.py").unlink()
+        result = self.staged()
+        self.assertEqual(result["verdict"], "act")
+        self.assertEqual(result["findings"][0]["file"], "処理.py")
+
+    def test_staged_deletion_is_not_checked(self):
+        self.write("app.py", SWALLOWS_ERROR)
+        self.commit_all()
+        self.git("rm", "-q", "app.py")
+        self.assertEqual(self.staged()["files_checked"], 0)
+
     def test_git_failure_is_an_error(self):
         with tempfile.TemporaryDirectory() as outside:
             if rc.git(Path(outside), "rev-parse", "--git-dir") is not None:
                 self.skipTest("一時フォルダが git のリポジトリの中にある")
             with self.assertRaises(rc.GitError):
-                rc.analyze([], Path(outside), changed=True, cfg=dict(rc.DEFAULTS))
+                rc.analyze([], Path(outside), mode="changed", cfg=dict(rc.DEFAULTS))
 
 
 if __name__ == "__main__":

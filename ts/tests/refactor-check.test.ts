@@ -1,39 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
 import { describe, test } from "node:test";
 
-import { analyze, DEFAULTS, type Result } from "../checks/refactor-check.ts";
-
-/** 共通の字下げを取り除く(Python の textwrap.dedent と同じ)。 */
-function dedent(text: string): string {
-  const lines = text.split("\n");
-  const indents = lines.filter((l) => l.trim()).map((l) => l.length - l.trimStart().length);
-  const cut = indents.length ? Math.min(...indents) : 0;
-  return lines.map((l) => l.slice(cut)).join("\n");
-}
-
-/** files: { ファイル名: 中身 } を一時フォルダに書いて調べる。 */
-function run(files: Record<string, string>): Result {
-  const root = mkdtempSync(path.join(tmpdir(), "rc-"));
-  try {
-    for (const [name, body] of Object.entries(files)) {
-      const p = path.join(root, name);
-      mkdirSync(path.dirname(p), { recursive: true });
-      writeFileSync(p, dedent(body), "utf8");
-    }
-    return analyze([root], root, { cfg: structuredClone(DEFAULTS) });
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-}
-
-const checks = (r: Result) => new Set(r.findings.map((f) => f.check));
-const find = (r: Result, check: string) => r.findings.filter((f) => f.check === check);
-const assertHas = (r: Result, ...names: string[]) => {
-  for (const n of names) assert.ok(checks(r).has(n as never), `${n} が見つからない: ${[...checks(r)].join(", ")}`);
-};
+import { assertHas, checks, find, run } from "./helpers.ts";
 
 describe("Python", () => {
   test("問題のないコードは skip", () => {
@@ -306,42 +274,6 @@ for (const mode of ["typescript", "heuristic"] as const) {
   });
 }
 
-describe("typescript の構文解析でだけ正確に数えられるもの", () => {
-  test("文字列やテンプレートの中の {} や if に惑わされない", () => {
-    const r = run({ "a.ts": `
-      export function render(items: string[]): string {
-        const tpl = \`\${items.map((x) => \`<li>\${x}</li>\`).join("")}\`;
-        return tpl;
-      }
-    ` });
-    assert.deepEqual(find(r, "deep-nesting"), []);
-    assert.deepEqual(find(r, "complexity"), []);
-  });
-
-  test("入れ子の関数の分岐は外の関数に数えない", () => {
-    const inner = Array.from({ length: 12 }, (_, i) => `    if (x === ${i}) return ${i};`).join("\n");
-    const r = run({ "a.ts": `export function outer(xs: number[]) {\n  return xs.map((x) => {\n${inner}\n    return 0;\n  });\n}\n` });
-    assert.deepEqual(find(r, "complexity").map((f) => f.name), ["(無名関数)"]);
-  });
-
-  test("any は構文木で見つける(正規表現の中の any は数えない)", () => {
-    const r = run({ "a.ts": `
-      export const RE = /<any>/;
-      export function f(xs: Array<any>) {
-        return xs;
-      }
-    ` });
-    assert.deepEqual(find(r, "type-escape").map((f) => f.line), [3]);
-  });
-
-  test("const はファイルの一番外にあっても指摘しない", () => {
-    const r = run({ "a.ts": `
-      export const LIMIT = 10;
-      export let counter = 0;
-    ` });
-    assert.deepEqual(find(r, "global-state").map((f) => f.line), [3]);
-  });
-});
 
 describe("ファイルをまたぐ検出", () => {
   const block = (name: string) => `

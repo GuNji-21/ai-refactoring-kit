@@ -75,6 +75,45 @@ describe("--changed(git で変更したファイルだけを調べる)", () => {
     assert.equal(r.verdict, "skip");
   });
 
+  const staged = () => analyze([], root, { staged: true, cfg: structuredClone(DEFAULTS) });
+
+  test("--staged: 作業中のファイルを戻しても、ステージした中身を調べる", () => {
+    write("app.py", CLEAN);
+    commitAll();
+    write("app.py", SWALLOWS_ERROR);
+    gitRun("add", "app.py");
+    write("app.py", CLEAN); // 作業中のファイルだけ元に戻す。コミットされるのは問題のある中身
+    assert.equal(changed().verdict, "skip");
+    const r = staged();
+    assert.equal(r.files_checked, 1);
+    assert.equal(r.verdict, "act");
+  });
+
+  test("--staged: ステージしていない変更は調べない", () => {
+    write("app.py", CLEAN);
+    commitAll();
+    write("app.py", SWALLOWS_ERROR);
+    const r = staged();
+    assert.equal(r.files_checked, 0);
+    assert.equal(r.verdict, "skip");
+  });
+
+  test("--staged: 作業中のファイルを消しても、ステージした中身を調べる", () => {
+    write("処理.ts", "export function f() {\n  try { g(); } catch (e) {}\n}\n");
+    gitRun("add", "処理.ts");
+    rmSync(path.join(root, "処理.ts"));
+    const r = staged();
+    assert.equal(r.verdict, "act");
+    assert.equal(r.findings[0].file, "処理.ts");
+  });
+
+  test("--staged: 削除をステージしたファイルは調べない", () => {
+    write("app.py", SWALLOWS_ERROR);
+    commitAll();
+    gitRun("rm", "-q", "app.py");
+    assert.equal(staged().files_checked, 0);
+  });
+
   test("git が失敗したらエラーにする", (t) => {
     const outside = mkdtempSync(path.join(tmpdir(), "rc-nogit-"));
     try {

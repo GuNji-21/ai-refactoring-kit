@@ -101,6 +101,25 @@ def changed_files(root: Path, exclude):
     return {p for p in paths if p.is_file() and wanted(p) and not is_excluded(p, exclude)}
 
 
+def staged_files(root: Path, exclude):
+    """ステージした変更のあるファイルと、ステージした中身 {パス: 中身}。
+
+    作業中のファイルではなくインデックスの中身を読むので、コミットされるものをそのまま調べられる。
+    git diff HEAD だけでは、ステージした変更と、その後で作業中のファイルを戻した変更が打ち消し合って見えなくなる。
+    """
+    names = git_paths(root, "diff", "--cached", "--name-only", "--relative", "--diff-filter=d")
+    staged = {}
+    for name in names:
+        p = (root / name).resolve()
+        if not wanted(p) or is_excluded(p, exclude):
+            continue
+        text = git(root, "show", f":./{name}")
+        if text is None:
+            raise GitError(f"git show :./{name} が失敗しました")
+        staged[p] = text
+    return staged
+
+
 def listed_files(paths, exclude):
     found = set()
     for raw in paths or ["."]:
@@ -112,13 +131,17 @@ def listed_files(paths, exclude):
     return found
 
 
-def load_sources(files, targets, root: Path):
+def load_sources(files, targets, root: Path, texts=None):
+    """texts {パス: 中身} にあるファイルは、ファイルの代わりにその中身を調べる。"""
+    texts = texts or {}
     sources = []
     for p in sorted(files):
+        text = texts.get(p)
         try:
-            if p.stat().st_size > MAX_FILE_BYTES:
+            size = len(text.encode("utf-8")) if text is not None else p.stat().st_size
+            if size > MAX_FILE_BYTES:
                 continue
-            src = Source(p, root, p in targets)
+            src = Source(p, root, p in targets, text)
         except OSError:
             continue
         if not any(len(line) > MAX_LINE_CHARS for line in src.lines[:MINIFIED_SAMPLE_LINES]):
@@ -126,13 +149,17 @@ def load_sources(files, targets, root: Path):
     return sources
 
 
-def select_files(paths, root: Path, changed, exclude):
-    """(問題を報告するファイル, 読み込むファイル) を返す。"""
-    if not changed:
+def select_files(paths, root: Path, mode, exclude):
+    """(問題を報告するファイル, 読み込むファイル, ファイルの代わりに調べる中身) を返す。"""
+    if mode == "staged":
+        texts = staged_files(root, exclude)
+        targets = set(texts)
+    elif mode == "changed":
+        texts, targets = {}, changed_files(root, exclude)
+    else:
         targets = listed_files(paths, exclude)
-        return targets, targets
-    targets = changed_files(root, exclude)
-    return targets, targets | {p.resolve() for p in walk(root, exclude)}  # 重複は全体と比べる
+        return targets, targets, {}
+    return targets, targets | {p.resolve() for p in walk(root, exclude)}, texts  # 重複は全体と比べる
 
 
 def run_checks(sources, cfg):
@@ -146,11 +173,12 @@ def run_checks(sources, cfg):
     return sorted(rep.findings, key=lambda f: (SEVERITY_ORDER[f["severity"]], f["file"], f["line"]))
 
 
-def analyze(paths, root: Path, changed=False, cfg=None):
+def analyze(paths, root: Path, mode="paths", cfg=None):
+    """mode: paths(指定した場所を調べる) / changed(git で変更したファイル) / staged(ステージした中身)。"""
     root = root.resolve()
     cfg = cfg or load_config(root)
-    targets, files = select_files(paths, root, changed, cfg["exclude"])
-    sources = load_sources(files, targets, root)
+    targets, files, texts = select_files(paths, root, mode, cfg["exclude"])
+    sources = load_sources(files, targets, root, texts)
     findings = run_checks(sources, cfg)
     pre = preflight(root, cfg["exclude"])
     result = decide(findings, pre)
@@ -202,7 +230,11 @@ def render(result, show_all=False):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="リファクタリングを始めるべきかどうかを判定する")
     parser.add_argument("paths", nargs="*", help="調べるファイルやフォルダ(省略すると今のフォルダ)")
-    parser.add_argument("--changed", action="store_true", help="git で変更したファイルだけを調べる")
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument("--changed", dest="mode", action="store_const", const="changed", default="paths",
+                       help="git で変更したファイルだけを調べる")
+    scope.add_argument("--staged", dest="mode", action="store_const", const="staged",
+                       help="ステージした中身だけを調べる(コミット前のフック用)")
     parser.add_argument("--root", default=".", help="プロジェクトの一番上のフォルダ")
     parser.add_argument("--json", action="store_true", help="JSON で出力する")
     parser.add_argument("--all", action="store_true", help="low の項目も表示する")
@@ -215,12 +247,12 @@ def main(argv=None):
             stream.reconfigure(encoding="utf-8")
 
     root = Path(args.root)
-    if args.changed and git(root, "rev-parse", "--git-dir") is None:
-        sys.stderr.write("--changed は git のリポジトリの中でだけ使えます\n")
+    if args.mode != "paths" and git(root, "rev-parse", "--git-dir") is None:
+        sys.stderr.write(f"--{args.mode} は git のリポジトリの中でだけ使えます\n")
         return 2
 
     try:
-        result = analyze(args.paths, root, changed=args.changed)
+        result = analyze(args.paths, root, mode=args.mode)
     except GitError as e:
         sys.stderr.write(f"変更したファイルを調べられません: {e}\n")
         return 2
