@@ -22,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from rc_brace import check_brace
-from rc_core import Report, Source, git, is_test_path, walk, wanted
+from rc_core import GitError, Report, Source, git, git_paths, is_excluded, is_test_path, walk, wanted
 from rc_lines import FILE_CHECKS, check_duplicates
 from rc_python import check_python
 from rc_rules import (CONFIG_FILE, DEFAULTS, MAX_FILE_BYTES, MAX_LINE_CHARS, MINIFIED_SAMPLE_LINES,
@@ -90,11 +90,15 @@ def load_config(root: Path):
     return cfg
 
 
-def changed_files(root: Path):
-    listed = (git(root, "diff", "--name-only", "HEAD") or "") + \
-             (git(root, "ls-files", "--others", "--exclude-standard") or "")
-    paths = {(root / line).resolve() for line in listed.splitlines() if line.strip()}
-    return {p for p in paths if p.is_file() and wanted(p)}
+def changed_files(root: Path, exclude):
+    """コミットしていない変更(追加・編集・未追跡)のあるファイル。パスは root から見たもの。"""
+    untracked = git_paths(root, "ls-files", "--others", "--exclude-standard")
+    if git(root, "rev-parse", "--verify", "--quiet", "HEAD") is None:
+        tracked = git_paths(root, "ls-files", "--cached")  # 最初のコミットの前は、追加したものすべてが変更
+    else:
+        tracked = git_paths(root, "diff", "--name-only", "--relative", "HEAD")
+    paths = {(root / name).resolve() for name in tracked + untracked}
+    return {p for p in paths if p.is_file() and wanted(p) and not is_excluded(p, exclude)}
 
 
 def listed_files(paths, exclude):
@@ -127,7 +131,7 @@ def select_files(paths, root: Path, changed, exclude):
     if not changed:
         targets = listed_files(paths, exclude)
         return targets, targets
-    targets = changed_files(root)
+    targets = changed_files(root, exclude)
     return targets, targets | {p.resolve() for p in walk(root, exclude)}  # 重複は全体と比べる
 
 
@@ -215,7 +219,11 @@ def main(argv=None):
         sys.stderr.write("--changed は git のリポジトリの中でだけ使えます\n")
         return 2
 
-    result = analyze(args.paths, root, changed=args.changed)
+    try:
+        result = analyze(args.paths, root, changed=args.changed)
+    except GitError as e:
+        sys.stderr.write(f"変更したファイルを調べられません: {e}\n")
+        return 2
     sys.stdout.write(json.dumps(result, ensure_ascii=False, indent=2) + "\n" if args.json
                      else render(result, args.all))
 

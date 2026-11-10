@@ -100,18 +100,27 @@ def _py_longest_branch_chain(func):
     return max((_chain_length(n) for n in ifs if id(n) not in continued), default=0)
 
 
+def _param_names(args):
+    """引数の名前。キーワード専用の引数(* の後ろ)も含め、self と cls は除く。"""
+    every = args.posonlyargs + args.args + args.kwonlyargs
+    return [a.arg for a in every if a.arg not in ("self", "cls")]
+
+
+def _bool_default_names(args):
+    """既定値が True / False の引数の名前。キーワード専用の引数も含む。"""
+    positional = args.posonlyargs + args.args
+    with_default = positional[len(positional) - len(args.defaults):]  # 既定値は後ろの引数から順に付く
+    pairs = list(zip(with_default, args.defaults)) + list(zip(args.kwonlyargs, args.kw_defaults))
+    return [a.arg for a, value in pairs if isinstance(value, ast.Constant) and isinstance(value.value, bool)]
+
+
 def _py_function(rep, src, node):
-    a = node.args
-    positional = [x.arg for x in a.posonlyargs + a.args]
-    with_default = positional[len(positional) - len(a.defaults):]
-    flags = [name for name, value in zip(with_default, a.defaults)
-             if isinstance(value, ast.Constant) and isinstance(value.value, bool)]
     check_function_metrics(rep, src, {
         "name": node.name, "line": node.lineno,
         "length": (node.end_lineno or node.lineno) - node.lineno + 1,
-        "params": len([p for p in positional if p not in ("self", "cls")]),
+        "params": len(_param_names(node.args)),
         "depth": _py_depth(node.body, 0), "complexity": _py_complexity(node),
-        "branches": _py_longest_branch_chain(node), "flags": flags,
+        "branches": _py_longest_branch_chain(node), "flags": _bool_default_names(node.args),
     })
 
 

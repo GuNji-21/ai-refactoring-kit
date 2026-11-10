@@ -1,3 +1,4 @@
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -77,6 +78,14 @@ class PythonChecks(unittest.TestCase):
                 return data
         """})
         self.assertEqual(find(result, "long-params")[0]["name"], "many")
+        self.assertIn("notify", find(result, "flag-param")[0]["message"])
+
+    def test_keyword_only_params_are_counted(self):
+        result = run({"a.py": """
+            def f(*, a, b, c, d, e, notify=False):
+                return a
+        """})
+        self.assertEqual(find(result, "long-params")[0]["name"], "f")
         self.assertIn("notify", find(result, "flag-param")[0]["message"])
 
     def test_swallowed_error_is_high(self):
@@ -258,6 +267,80 @@ class CrossFileChecks(unittest.TestCase):
         })
         self.assertEqual(result["preflight"]["test_files"], 1)
         self.assertEqual(result["findings"], [])
+
+
+SWALLOWS_ERROR = "def load():\n    try:\n        return 1\n    except Exception:\n        pass\n"
+CLEAN = "def add(a, b):\n    return a + b\n"
+
+
+class ChangedMode(unittest.TestCase):
+    """--changed(git で変更したファイルだけを調べる)の動き。"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.git("init", "-q", ".")
+
+    def git(self, *args):
+        identity = ["-c", "user.name=test", "-c", "user.email=test@example.invalid"]
+        subprocess.run(["git", *identity, *args], cwd=self.root, check=True, capture_output=True)
+
+    def write(self, name, body):
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+
+    def commit_all(self):
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "commit")
+
+    def changed(self, **overrides):
+        return rc.analyze([], self.root, changed=True, cfg={**rc.DEFAULTS, **overrides})
+
+    def test_untracked_file_with_japanese_name(self):
+        self.write("base.py", CLEAN)
+        self.commit_all()
+        self.write("処理.py", SWALLOWS_ERROR)
+        result = self.changed()
+        self.assertEqual(result["verdict"], "act")
+        self.assertEqual(result["findings"][0]["file"], "処理.py")
+
+    def test_modified_file_with_japanese_name(self):
+        self.write("処理.py", CLEAN)
+        self.commit_all()
+        self.write("処理.py", SWALLOWS_ERROR)
+        self.assertEqual(self.changed()["verdict"], "act")
+
+    def test_staged_file_before_first_commit(self):
+        self.write("app.py", SWALLOWS_ERROR)
+        self.git("add", "app.py")
+        result = self.changed()
+        self.assertEqual(result["files_checked"], 1)
+        self.assertEqual(result["verdict"], "act")
+
+    def test_unchanged_files_are_not_reported(self):
+        self.write("old.py", SWALLOWS_ERROR)
+        self.commit_all()
+        self.write("new.py", CLEAN)
+        result = self.changed()
+        self.assertEqual(result["files_checked"], 1)
+        self.assertEqual(result["verdict"], "skip")
+
+    def test_exclude_applies_to_changed_files(self):
+        self.write("base.py", CLEAN)
+        self.commit_all()
+        self.write("generated/out.py", SWALLOWS_ERROR)
+        result = self.changed(exclude=["generated/"])
+        self.assertEqual(result["files_checked"], 0)
+        self.assertEqual(result["verdict"], "skip")
+
+    def test_git_failure_is_an_error(self):
+        with tempfile.TemporaryDirectory() as outside:
+            if rc.git(Path(outside), "rev-parse", "--git-dir") is not None:
+                self.skipTest("一時フォルダが git のリポジトリの中にある")
+            with self.assertRaises(rc.GitError):
+                rc.analyze([], Path(outside), changed=True, cfg=dict(rc.DEFAULTS))
 
 
 if __name__ == "__main__":

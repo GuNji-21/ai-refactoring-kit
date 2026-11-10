@@ -107,12 +107,17 @@ def wanted(path: Path) -> bool:
     return path.suffix.lower() in (PY_EXT | BRACE_EXT)
 
 
+def is_excluded(path: Path, exclude) -> bool:
+    """設定の exclude のどれかを、パスに含んでいるか。"""
+    return any(x in path.as_posix() for x in exclude)
+
+
 def walk(root: Path, exclude):
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         for name in filenames:
             p = Path(dirpath) / name
-            if wanted(p) and not any(x in p.as_posix() for x in exclude):
+            if wanted(p) and not is_excluded(p, exclude):
                 yield p
 
 
@@ -125,6 +130,22 @@ def git(root: Path, *args):
     return r.stdout if r.returncode == 0 else None
 
 
+class GitError(RuntimeError):
+    """git のコマンドが失敗した。"""
+
+
+def git_paths(root: Path, command, *args):
+    """git が出力したパスの一覧を返す。失敗したら GitError を出す。
+
+    -z を付けて NUL 区切りで受け取る。付けないと、日本語などの名前が
+    "\\345\\207\\246..." のように書き換えられて、ファイルを見つけられなくなる。
+    """
+    out = git(root, command, "-z", *args)
+    if out is None:
+        raise GitError(f"git {command} {' '.join(args)} が失敗しました")
+    return [p for p in out.split("\0") if p]
+
+
 # ---------------------------------------------------------------- 検出
 
 
@@ -134,9 +155,10 @@ class Report:
         self.findings = []
         self.chain = re.compile(r"(?:\.[\w$]+\(\s*\)){%d,}" % (cfg["max_chain_calls"] + 1))
 
-    def add(self, check, severity, at, message, *, name=""):
-        """at は (ファイル, 行番号)。"""
-        src, line = at
+    def add(self, check, severity, at, message):
+        """at は (ファイル, 行番号) か (ファイル, 行番号, 関数名)。"""
+        src, line, *rest = at
+        name = rest[0] if rest else ""
         raw = src.lines[line - 1] if 0 < line <= len(src.lines) else ""
         if IGNORE_MARK in raw:
             return
@@ -165,11 +187,12 @@ FUNCTION_METRICS = (
 def check_function_metrics(rep, src, fn):
     """fn: name, line, length, params, depth, complexity, branches, flags を持つ辞書。"""
     label = f"関数 {fn['name']}"
+    at = (src, fn["line"], fn["name"])
     for check, key, limit_key, sentence, can_be_high in FUNCTION_METRICS:
         value, limit = fn[key], rep.cfg[limit_key]
         if value > limit:
             severity = level(value, limit) if can_be_high else "medium"
-            rep.add(check, severity, (src, fn["line"]), f"{label} " + sentence.format(v=value, m=limit), name=fn["name"])
+            rep.add(check, severity, at, f"{label} " + sentence.format(v=value, m=limit))
     if fn["flags"] and not src.is_test:
-        rep.add("flag-param", "low", (src, fn["line"]),
-                f"{label} が true/false の引数({', '.join(fn['flags'])})で動きを切り替えている", name=fn["name"])
+        rep.add("flag-param", "low", at,
+                f"{label} が true/false の引数({', '.join(fn['flags'])})で動きを切り替えている")
