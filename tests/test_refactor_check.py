@@ -121,7 +121,7 @@ class PythonChecks(unittest.TestCase):
 
     def test_secret(self):
         result = run({"a.py": """
-            API_KEY = "sk_live_abcdefgh12345678"
+            API_KEY = "abcd1234efgh5678ijkl"
             PASSWORD = "your-password-here"
         """})
         self.assertEqual([f["line"] for f in find(result, "secret")], [2])
